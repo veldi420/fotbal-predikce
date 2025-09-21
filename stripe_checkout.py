@@ -1,54 +1,92 @@
+# stripe_checkout.py
+# ------------------
 import os
-import streamlit as st
 import stripe
+import streamlit as st
 
-# Stripe konfigurace z Environment variables
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")
+# ====== Nastavení klíčů z ENV ======
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_PRICE_ID   = os.getenv("STRIPE_PRICE_ID", "").strip()
+PUBLIC_URL        = os.getenv("PUBLIC_URL", "").strip()  # např. https://fotbal-predikce-3.onrender.com
 
-if not STRIPE_SECRET_KEY:
-    st.error("❌ Chybí STRIPE_SECRET_KEY v nastavení Renderu.")
-    st.stop()
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
-stripe.api_key = STRIPE_SECRET_KEY
+def _require_stripe_ready() -> bool:
+    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+        st.error("Stripe není nakonfigurován. Na Renderu nastav **STRIPE_SECRET_KEY** a **STRIPE_PRICE_ID** v Environment Variables.")
+        return False
+    return True
 
 def has_active_subscription(email: str) -> bool:
-    """Vrací True, pokud má uživatel aktivní předplatné."""
+    """Zkontroluje aktivní/trial předplatné podle e-mailu (sandbox i live)."""
+    if not _require_stripe_ready() or not email:
+        return False
     try:
-        customers = stripe.Customer.list(email=email, limit=1).data
-        if not customers:
-            return False
-        customer = customers[0]
-        subs = stripe.Subscription.list(customer=customer.id, status="active")
-        return len(subs.data) > 0
+        customers = stripe.Customer.list(email=email, limit=3).data
+        for cust in customers:
+            subs = stripe.Subscription.list(customer=cust.id, status="all", limit=5).data
+            for s in subs:
+                if s.status in ("active", "trialing"):
+                    return True
+        return False
+    except stripe.error.AuthenticationError:
+        st.error("Chybný Stripe API key (použij **test** klíč sk_test_... v Sandboxu).")
+        return False
     except Exception as e:
-        st.error(f"Chyba při kontrole předplatného: {e}")
+        st.warning(f"Stripe kontrola selhala: {e}")
         return False
 
-def paywall_ui(protected_content_callback):
-    """Zobrazí paywall, dokud není aktivní předplatné."""
-    st.title("🔒 Fotbalové predikce – předplatné")
-    st.markdown("Plný přístup za **399 Kč / měsíc**")
+def paywall_ui(render_protected):
+    """Jednoduchý paywall: pokud není aktivní předplatné, nabídne Checkout."""
+    st.markdown("### 🔒 Předplatné")
+    st.caption("Pro plný přístup je potřeba aktivní předplatné (399 Kč / měsíc).")
 
-    # email od uživatele
-    email = st.text_input("E-mail pro aktivaci předplatného:")
+    # e-mail – použijeme ho pro přiřazení předplatného
+    email = st.text_input("Váš e-mail", placeholder="např. jan.novak@email.cz")
 
-    # Ověření předplatného
-    if email and has_active_subscription(email):
-        st.session_state.subscribed = True
-        protected_content_callback()
+    # když se vrátíme ze Stripe Checkout (success=1), zobraz obsah
+    qp = st.query_params
+    just_success = qp.get("success", ["0"])[0] == "1"
+
+    subscribed = has_active_subscription(email) if email else False
+    if subscribed:
+        st.success("✅ Máte aktivní předplatné. Děkujeme!")
+        render_protected()
         return
 
-    # Platební tlačítko
-    if email and st.button("Předplatit 399 Kč / měsíc"):
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{"price": PRICE_ID, "quantity": 1}],
-            mode="subscription",
-            customer_email=email,
-            success_url=st.query_params.get("PUBLIC_BASE_URL", "https://example.com"),
-            cancel_url=st.query_params.get("PUBLIC_BASE_URL", "https://example.com"),
-        )
-        st.markdown(f"[👉 Klikněte zde pro platbu]({session.url})")
+    if just_success and email:
+        # po návratu ze Stripe chvilku trvá, než Stripe oznámí subskripci → zkusíme najít
+        if has_active_subscription(email):
+            st.success("✅ Platba potvrzena. Předplatné je aktivní.")
+            render_protected()
+            return
+        st.info("Platba proběhla, aktivace může trvat pár sekund. Zkuste to za chvíli znovu.")
 
-    st.stop()
+    st.warning("Nemáte aktivní předplatné.")
+
+    # tlačítko do Stripe Checkout
+    if st.button("💳 Přejít na platbu (Stripe)"):
+        if not _require_stripe_ready():
+            st.stop()
+        if not email:
+            st.error("Zadejte prosím e-mail.")
+            st.stop()
+
+        success_url = (PUBLIC_URL or "https://example.com") + "?success=1"
+        cancel_url  = (PUBLIC_URL or "https://example.com") + "?canceled=1"
+
+        try:
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                payment_method_types=["card"],
+                line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+                customer_email=email,
+                success_url=success_url,
+                cancel_url=cancel_url,
+                allow_promotion_codes=True,
+            )
+            st.link_button("🔗 Otevřít Stripe Checkout", session.url, use_container_width=True, type="primary")
+            st.caption("Pokud se odkaz neotevře automaticky, klepněte na tlačítko výše.")
+        except Exception as e:
+            st.error(f"Vytvoření Checkout session selhalo: {e}")
