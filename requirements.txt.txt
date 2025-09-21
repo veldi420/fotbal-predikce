@@ -1,0 +1,5 @@
+stripe
+streamlit>=1.36
+numpy>=1.26
+pandas
+plotly
