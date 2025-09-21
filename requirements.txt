@@ -1,5 +1,3 @@
-stripe
 streamlit>=1.36
+stripe>=10.0.0
 numpy>=1.26
-pandas
-plotly
