@@ -39,3 +39,4 @@ def protected_content():
 
 # Paywall – voláme hlavní obsah jen při aktivním předplatném
 paywall_ui(protected_content)
+
